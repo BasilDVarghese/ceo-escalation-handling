@@ -4,6 +4,24 @@ A multi-agent [LangGraph](https://langchain-ai.github.io/langgraph/) app that tr
 and routes escalated issues arriving by email to the right internal team — with context and a
 recommended action — and never sends anything until the CEO approves it.
 
+## Highlights
+
+- **3-agent LangGraph pipeline** (Triage → Summarize → Route), each making its own Claude call
+  with structured-output parsing (Pydantic) rather than one call reused three times.
+- **Human-in-the-loop approval gate** via LangGraph `interrupt()` / `Command(resume=...)`,
+  persisted with a SQLite checkpointer so pending approvals survive process restarts — nothing
+  is ever sent automatically.
+- **SQL-backed routing taxonomy + audit trail** (SQLAlchemy): team ownership is queryable/editable
+  without code changes, and every escalation's full lifecycle (triage → summary → routing →
+  approval → dispatch) is recorded.
+- **Standalone Gmail integration** (OAuth2, label-based filtering, automated send) — independent
+  of any hosted AI platform, so the service can be deployed anywhere.
+- **CLI-driven ops**: a polling daemon (`run`) and an interactive approval queue (`review`), kept
+  as separate processes so polling never blocks on stdin.
+- **Test suite** (`pytest`) validates the full graph — pause-at-approval, approve-sends,
+  reject-doesn't-send, and the not-a-real-escalation short circuit — against mocked LLM/Gmail
+  calls, so it runs offline with zero API cost.
+
 ## Architecture
 
 ```
