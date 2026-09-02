@@ -43,7 +43,7 @@ def _build_direct_anthropic() -> ChatAnthropic:
 def _build_bedrock():
     from langchain_aws import ChatBedrockConverse
 
-    kwargs: dict[str, Any] = {"model": CONFIG.bedrock_model_id, "max_tokens": 4096}
+    kwargs: dict[str, Any] = {"model_id": CONFIG.bedrock_model_id, "max_tokens": 4096}
     if CONFIG.aws_region:
         kwargs["region_name"] = CONFIG.aws_region
     # else: falls through to boto3's standard credential/region chain.

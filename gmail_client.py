@@ -106,15 +106,18 @@ def fetch_new_escalation_emails(service: Resource) -> list[dict[str, Any]]:
         message = (
             service.users().messages().get(userId="me", id=stub["id"], format="full").execute()
         )
-        headers = {h["name"]: h["value"] for h in message["payload"].get("headers", [])}
+        # Header names are case-insensitive per RFC 5322 — Gmail's own messages.insert API
+        # lowercases them, and some relays do too, so look them up case-insensitively rather
+        # than assuming the "From"/"Subject"/"Date" casing most inbound mail happens to use.
+        headers = {h["name"].lower(): h["value"] for h in message["payload"].get("headers", [])}
         emails.append(
             {
                 "gmail_message_id": message["id"],
                 "gmail_thread_id": message.get("threadId", ""),
-                "sender": headers.get("From", ""),
-                "subject": headers.get("Subject", ""),
+                "sender": headers.get("from", ""),
+                "subject": headers.get("subject", ""),
                 "raw_body": _decode_body(message["payload"]),
-                "received_at": headers.get("Date", ""),
+                "received_at": headers.get("date", ""),
             }
         )
     return emails
@@ -150,9 +153,12 @@ def mark_processed(service: Resource, message_id: str) -> None:
 # accepted trade-off at this tool's internal, human-approved-before-send scale.
 def send_email(service: Resource, to: str, subject: str, body: str, thread_id: str | None = None) -> str:
     message = MIMEText(body)
-    message["to"] = to
-    message["from"] = CONFIG.sender_email
-    message["subject"] = subject
+    # Conventional RFC 5322 casing ("To"/"From"/"Subject") — Python's email.message.Message
+    # stores header names verbatim rather than normalizing them, and Gmail's own API tooling
+    # (e.g. messages.get's metadataHeaders filter) does exact-case matching on header names.
+    message["To"] = to
+    message["From"] = CONFIG.sender_email
+    message["Subject"] = subject
     encoded = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
 
     send_body: dict[str, Any] = {"raw": encoded}
