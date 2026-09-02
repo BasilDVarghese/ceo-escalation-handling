@@ -2,21 +2,22 @@
 
     python main.py run       — start the Gmail polling loop (never blocks on stdin)
     python main.py review    — interactively approve/reject pending escalations
+
+Don't run `run`/`review` at the same time as `uvicorn api:app` against the same
+CHECKPOINT_DB_PATH — see pipeline.py / README's Concurrency note. When the API is in use,
+prefer it (POST /escalations, POST /approve) over these CLI commands.
 """
 
 from __future__ import annotations
 
 import argparse
-import datetime
 import logging
 import time
 
-from langgraph.types import Command
-
 import db
 import gmail_client
+import pipeline
 from config import CONFIG
-from graph import compiled_graph, thread_id_for
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("main")
@@ -33,46 +34,10 @@ def cmd_run(_args: argparse.Namespace) -> None:
 
     while True:
         try:
-            emails = gmail_client.fetch_new_escalation_emails(service)
+            pipeline.poll_once(service)
         except Exception:
-            logger.exception("Failed to fetch emails this cycle; will retry next cycle")
-            emails = []
-
-        for email in emails:
-            try:
-                _process_one_email(email)
-            except Exception:
-                logger.exception("Failed to process email %s", email.get("gmail_message_id"))
-
+            logger.exception("Poll cycle failed; will retry next cycle")
         time.sleep(CONFIG.gmail_poll_interval_minutes * 60)
-
-
-def _process_one_email(email: dict) -> None:
-    escalation_id = db.create_escalation(
-        gmail_message_id=email["gmail_message_id"],
-        gmail_thread_id=email.get("gmail_thread_id"),
-        sender=email.get("sender"),
-        subject=email.get("subject"),
-        raw_body=email.get("raw_body"),
-        received_at=datetime.datetime.now(datetime.timezone.utc),
-        thread_checkpoint_id=thread_id_for(email["gmail_message_id"]),
-    )
-
-    initial_state = {
-        "escalation_id": escalation_id,
-        "gmail_message_id": email["gmail_message_id"],
-        "gmail_thread_id": email.get("gmail_thread_id", ""),
-        "sender": email.get("sender", ""),
-        "subject": email.get("subject", ""),
-        "raw_body": email.get("raw_body", ""),
-        "received_at": email.get("received_at", ""),
-    }
-    config = {"configurable": {"thread_id": thread_id_for(email["gmail_message_id"])}}
-
-    # Returns as soon as it hits the human_approval interrupt (or completes early,
-    # e.g. if triage decided this wasn't a real escalation).
-    compiled_graph.invoke(initial_state, config=config)
-    logger.info("Processed escalation id=%s subject=%r", escalation_id, email.get("subject"))
 
 
 def cmd_review(_args: argparse.Namespace) -> None:
@@ -85,13 +50,13 @@ def cmd_review(_args: argparse.Namespace) -> None:
 
     for escalation in pending:
         print("\n" + "=" * 72)
-        print(f"Escalation #{escalation.id}")
-        print(f"From:      {escalation.sender}")
-        print(f"Subject:   {escalation.subject}")
-        print(f"Severity:  {escalation.severity}")
-        print(f"Summary:   {escalation.summary}")
-        print(f"Team:      {escalation.routed_team}  ({escalation.owner_email})")
-        print(f"Action:    {escalation.recommended_action}")
+        print(f"Escalation #{escalation['escalation_id']}")
+        print(f"From:      {escalation.get('sender')}")
+        print(f"Subject:   {escalation.get('subject')}")
+        print(f"Severity:  {escalation.get('severity')}")
+        print(f"Summary:   {escalation.get('summary')}")
+        print(f"Team:      {escalation.get('routed_team')}  ({escalation.get('owner_email')})")
+        print(f"Action:    {escalation.get('recommended_action')}")
         print("=" * 72)
 
         choice = input("[a]pprove / [r]eject / [e]dit / [s]kip / [q]uit: ").strip().lower()
@@ -100,14 +65,14 @@ def cmd_review(_args: argparse.Namespace) -> None:
         if choice == "s":
             continue
 
-        final_team = escalation.routed_team
-        final_action = escalation.recommended_action
+        final_team = escalation.get("routed_team")
+        final_action = escalation.get("recommended_action")
 
         if choice == "e":
-            team_input = input(f"Team [{escalation.routed_team}]: ").strip()
+            team_input = input(f"Team [{escalation.get('routed_team')}]: ").strip()
             if team_input:
                 if team_input not in valid_teams:
-                    print(f"Unknown team {team_input!r}; keeping {escalation.routed_team!r}.")
+                    print(f"Unknown team {team_input!r}; keeping {escalation.get('routed_team')!r}.")
                 else:
                     final_team = team_input
             action_input = input("Recommended action (blank to keep current): ").strip()
@@ -124,17 +89,18 @@ def cmd_review(_args: argparse.Namespace) -> None:
 
         notes = input("Notes (optional): ").strip()
 
-        resume_payload = {
-            "decision": decision,
-            "final_team": final_team,
-            "final_action": final_action,
-            "notes": notes,
-        }
-        config = {"configurable": {"thread_id": thread_id_for(escalation.gmail_message_id)}}
-        compiled_graph.invoke(Command(resume=resume_payload), config=config)
+        result = pipeline.resolve_approval(
+            escalation["escalation_id"],
+            {
+                "decision": decision,
+                "final_team": final_team,
+                "final_action": final_action,
+                "notes": notes,
+            },
+        )
 
         if decision == "approved":
-            print(f"Approved and sent to {final_team}.")
+            print(f"Approved and sent to {final_team}. Status: {result.get('status') if result else '?'}")
         else:
             print("Rejected and archived.")
 

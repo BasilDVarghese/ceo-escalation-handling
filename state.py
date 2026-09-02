@@ -12,7 +12,7 @@ from typing import TypedDict
 
 class EscalationState(TypedDict, total=False):
     # --- identity / persistence linkage ---
-    escalation_id: int  # DB row id, set immediately after ingestion
+    escalation_id: str  # gmail_message_id, or "manual-<uuid4>" for API-submitted escalations
     gmail_message_id: str
     gmail_thread_id: str
 

@@ -20,12 +20,13 @@ from state import EscalationState
 logger = logging.getLogger(__name__)
 
 
-def thread_id_for(gmail_message_id: str) -> str:
-    return f"escalation-{gmail_message_id}"
+def thread_id_for(escalation_id: str) -> str:
+    return f"escalation-{escalation_id}"
 
 
-def _now() -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc)
+def _now() -> str:
+    """ISO-8601 timestamp string — DynamoDB (via boto3) can't serialize raw datetime objects."""
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
 def human_approval_node(state: EscalationState) -> dict:
@@ -82,7 +83,7 @@ def dispatch_node(state: EscalationState) -> dict:
         service = gmail_client.get_gmail_service()
         gmail_client.send_email(service, to=owner_email, subject=subject, body=body)
         db.update_escalation(state["escalation_id"], status="sent", sent_at=_now())
-        gmail_client.mark_processed(service, state["gmail_message_id"])
+        _mark_processed_if_from_gmail(state)
         return {"dispatch_status": "sent"}
     except Exception as exc:  # noqa: BLE001 - a failed send must not crash the poller
         logger.exception("Failed to dispatch escalation %s", state.get("escalation_id"))
@@ -92,16 +93,23 @@ def dispatch_node(state: EscalationState) -> dict:
 
 def archive_not_escalation_node(state: EscalationState) -> dict:
     db.update_escalation(state["escalation_id"], status="not_escalation")
-    service = gmail_client.get_gmail_service()
-    gmail_client.mark_processed(service, state["gmail_message_id"])
+    _mark_processed_if_from_gmail(state)
     return {"dispatch_status": "archived"}
 
 
 def archive_rejected_node(state: EscalationState) -> dict:
     db.update_escalation(state["escalation_id"], status="rejected")
-    service = gmail_client.get_gmail_service()
-    gmail_client.mark_processed(service, state["gmail_message_id"])
+    _mark_processed_if_from_gmail(state)
     return {"dispatch_status": "archived"}
+
+
+def _mark_processed_if_from_gmail(state: EscalationState) -> None:
+    """Escalations submitted manually via the API have no Gmail message to label."""
+    gmail_message_id = state.get("gmail_message_id")
+    if not gmail_message_id:
+        return
+    service = gmail_client.get_gmail_service()
+    gmail_client.mark_processed(service, gmail_message_id)
 
 
 def _route_after_triage(state: EscalationState) -> str:

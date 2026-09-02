@@ -5,38 +5,6 @@ from __future__ import annotations
 from langgraph.types import Command
 
 import db
-from agents.router import RoutingResult
-from agents.summarizer import SummaryResult
-from agents.triage import TriageResult
-
-
-def _patch_agents(monkeypatch, stub_llm, *, is_escalation=True, team="Engineering"):
-    monkeypatch.setattr(
-        "agents.triage.get_llm",
-        lambda: stub_llm(
-            TriageResult(
-                is_genuine_escalation=is_escalation,
-                severity="high",
-                urgency_notes="Customer threatening to churn.",
-                key_facts=["Customer X reported repeated outages."],
-            )
-        ),
-    )
-    monkeypatch.setattr(
-        "agents.summarizer.get_llm",
-        lambda: stub_llm(
-            SummaryResult(summary="Customer X is hitting repeated outages and is at risk of churn.")
-        ),
-    )
-    monkeypatch.setattr(
-        "agents.router.get_llm",
-        lambda: stub_llm(
-            RoutingResult(
-                team_name=team,
-                recommended_action="Investigate the outage root cause today.",
-            )
-        ),
-    )
 
 
 def _initial_state(message_id: str) -> dict:
@@ -57,13 +25,13 @@ def _initial_state(message_id: str) -> dict:
     }
 
 
-def test_pauses_at_human_approval(monkeypatch, stub_llm, mock_gmail):
-    _patch_agents(monkeypatch, stub_llm)
+def test_pauses_at_human_approval(patch_agents, mock_gmail):
+    patch_agents()
     from graph import compiled_graph, thread_id_for
 
     message_id = "msg-pause-1"
     state = _initial_state(message_id)
-    config = {"configurable": {"thread_id": thread_id_for(message_id)}}
+    config = {"configurable": {"thread_id": thread_id_for(state["escalation_id"])}}
 
     compiled_graph.invoke(state, config=config)
 
@@ -71,21 +39,21 @@ def test_pauses_at_human_approval(monkeypatch, stub_llm, mock_gmail):
     assert snapshot.next == ("human_approval",)
 
     escalation = db.get_escalation(state["escalation_id"])
-    assert escalation.status == "pending_approval"
-    assert escalation.routed_team == "Engineering"
-    assert escalation.owner_email == "engineering@example.com"
+    assert escalation["status"] == "pending_approval"
+    assert escalation["routed_team"] == "Engineering"
+    assert escalation["owner_email"] == "engineering@example.com"
 
     # Nothing is sent just by reaching the gate.
     mock_gmail["send_email"].assert_not_called()
 
 
-def test_resume_approved_sends_email(monkeypatch, stub_llm, mock_gmail):
-    _patch_agents(monkeypatch, stub_llm)
+def test_resume_approved_sends_email(patch_agents, mock_gmail):
+    patch_agents()
     from graph import compiled_graph, thread_id_for
 
     message_id = "msg-approve-1"
     state = _initial_state(message_id)
-    config = {"configurable": {"thread_id": thread_id_for(message_id)}}
+    config = {"configurable": {"thread_id": thread_id_for(state["escalation_id"])}}
     compiled_graph.invoke(state, config=config)
 
     compiled_graph.invoke(
@@ -105,16 +73,16 @@ def test_resume_approved_sends_email(monkeypatch, stub_llm, mock_gmail):
     assert kwargs["to"] == "engineering@example.com"
 
     escalation = db.get_escalation(state["escalation_id"])
-    assert escalation.status == "sent"
+    assert escalation["status"] == "sent"
 
 
-def test_resume_rejected_does_not_send(monkeypatch, stub_llm, mock_gmail):
-    _patch_agents(monkeypatch, stub_llm)
+def test_resume_rejected_does_not_send(patch_agents, mock_gmail):
+    patch_agents()
     from graph import compiled_graph, thread_id_for
 
     message_id = "msg-reject-1"
     state = _initial_state(message_id)
-    config = {"configurable": {"thread_id": thread_id_for(message_id)}}
+    config = {"configurable": {"thread_id": thread_id_for(state["escalation_id"])}}
     compiled_graph.invoke(state, config=config)
 
     compiled_graph.invoke(
@@ -125,10 +93,12 @@ def test_resume_rejected_does_not_send(monkeypatch, stub_llm, mock_gmail):
     mock_gmail["send_email"].assert_not_called()
 
     escalation = db.get_escalation(state["escalation_id"])
-    assert escalation.status == "rejected"
+    assert escalation["status"] == "rejected"
 
 
 def test_not_genuine_escalation_short_circuits(monkeypatch, stub_llm, mock_gmail):
+    from agents.triage import TriageResult
+
     monkeypatch.setattr(
         "agents.triage.get_llm",
         lambda: stub_llm(
@@ -151,7 +121,7 @@ def test_not_genuine_escalation_short_circuits(monkeypatch, stub_llm, mock_gmail
 
     message_id = "msg-noise-1"
     state = _initial_state(message_id)
-    config = {"configurable": {"thread_id": thread_id_for(message_id)}}
+    config = {"configurable": {"thread_id": thread_id_for(state["escalation_id"])}}
 
     compiled_graph.invoke(state, config=config)
 
@@ -159,7 +129,7 @@ def test_not_genuine_escalation_short_circuits(monkeypatch, stub_llm, mock_gmail
     assert snapshot.next == ()
 
     escalation = db.get_escalation(state["escalation_id"])
-    assert escalation.status == "not_escalation"
+    assert escalation["status"] == "not_escalation"
 
     mock_gmail["send_email"].assert_not_called()
     mock_gmail["mark_processed"].assert_called_once()
