@@ -11,6 +11,8 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import Resource, build
+from googleapiclient.errors import HttpError
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from config import CONFIG
 
@@ -19,6 +21,24 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.send",
 ]
+
+# Retry only genuinely transient failures — rate limiting and server-side errors — not 4xx
+# client errors like a bad request or missing permission, which retrying can't fix.
+_TRANSIENT_HTTP_STATUSES = {429, 500, 502, 503, 504}
+
+
+def _is_transient_gmail_error(exc: BaseException) -> bool:
+    if isinstance(exc, HttpError):
+        return getattr(exc.resp, "status", None) in _TRANSIENT_HTTP_STATUSES
+    return isinstance(exc, (ConnectionError, TimeoutError))
+
+
+_retry_gmail_call = retry(
+    retry=retry_if_exception(_is_transient_gmail_error),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=8),
+    reraise=True,
+)
 
 
 _service: Resource | None = None
@@ -75,6 +95,7 @@ def _decode_body(payload: dict[str, Any]) -> str:
     return ""
 
 
+@_retry_gmail_call
 def fetch_new_escalation_emails(service: Resource) -> list[dict[str, Any]]:
     """List + fetch messages matching CONFIG.gmail_query, decoded into plain dicts."""
     results = service.users().messages().list(userId="me", q=CONFIG.gmail_query).execute()
@@ -113,6 +134,7 @@ def _get_or_create_label_id(service: Resource, label_name: str) -> str:
     return created["id"]
 
 
+@_retry_gmail_call
 def mark_processed(service: Resource, message_id: str) -> None:
     """Remove UNREAD, add the processed label, so the poller doesn't refetch it."""
     processed_label_id = _get_or_create_label_id(service, CONFIG.gmail_processed_label)
@@ -123,6 +145,9 @@ def mark_processed(service: Resource, message_id: str) -> None:
     ).execute()
 
 
+@_retry_gmail_call  # note: a timeout after the send actually succeeded server-side could in
+# principle cause a duplicate send on retry — the Gmail API has no send idempotency key. An
+# accepted trade-off at this tool's internal, human-approved-before-send scale.
 def send_email(service: Resource, to: str, subject: str, body: str, thread_id: str | None = None) -> str:
     message = MIMEText(body)
     message["to"] = to

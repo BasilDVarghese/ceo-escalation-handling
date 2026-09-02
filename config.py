@@ -80,7 +80,9 @@ class Config:
     fallback_team: str = field(default_factory=lambda: _env("FALLBACK_TEAM", "Customer Support"))
 
     # --- JWT / dev auth (api.py) ---
-    jwt_secret_key: str = field(default_factory=lambda: _env("JWT_SECRET_KEY", "dev-secret-change-me"))
+    # No insecure default here on purpose — a guessable fallback baked into source (this repo
+    # is public) would let anyone forge a valid JWT against a deployment that forgot to set this.
+    jwt_secret_key: str = field(default_factory=lambda: _require("JWT_SECRET_KEY"))
     jwt_algorithm: str = field(default_factory=lambda: _env("JWT_ALGORITHM", "HS256"))
     jwt_expire_minutes: int = field(default_factory=lambda: int(_env("JWT_EXPIRE_MINUTES", "30")))
 

@@ -17,6 +17,7 @@ from moto import mock_aws
 
 _tmp_dir = Path(tempfile.mkdtemp(prefix="ceo-escalation-tests-"))
 os.environ["ANTHROPIC_API_KEY"] = "test-key"
+os.environ["JWT_SECRET_KEY"] = "test-jwt-secret-do-not-use-in-real-deployments"
 os.environ["CHECKPOINT_DB_PATH"] = str(_tmp_dir / "checkpoints.sqlite")
 os.environ["GMAIL_CREDENTIALS_PATH"] = str(_tmp_dir / "credentials.json")
 os.environ["GMAIL_TOKEN_PATH"] = str(_tmp_dir / "token.json")
